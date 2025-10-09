@@ -1,16 +1,15 @@
-"""Financial Data Bot using LangGraph and yfinance.
+"""Financial Data Bot using Alternative APIs.
 
-This bot provides real-time stock and Bitcoin price information through a conversational interface.
-It uses LangGraph for agent orchestration and yfinance for stock data.
+This bot provides real-time stock and Bitcoin price information.
+Uses Finnhub API for stocks and CoinGecko for Bitcoin.
 """
 
 import logging
 import re
-from typing import Any, Dict, List, Optional, TypedDict, Union
+from typing import Any, Dict, List, Optional, TypedDict
 from datetime import datetime
 import requests
 import urllib3
-import yfinance as yf
 import ssl
 import os
 from langgraph.graph import END, START, StateGraph
@@ -20,8 +19,6 @@ from pydantic_settings import BaseSettings
 # Aggressive SSL bypass for corporate firewalls
 ssl._create_default_https_context = ssl._create_unverified_context
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-
-# Disable SSL verification in environment variables (for yfinance)
 os.environ['CURL_CA_BUNDLE'] = ''
 os.environ['REQUESTS_CA_BUNDLE'] = ''
 
@@ -32,6 +29,8 @@ class Settings(BaseSettings):
         env_file = '.env'
         env_file_encoding = 'utf-8'
         extra = 'ignore'
+
+settings = Settings()
 
 def setup_logging(level: int = logging.INFO) -> None:
     """Configure the root logger with consistent formatting."""
@@ -50,7 +49,7 @@ def setup_logging(level: int = logging.INFO) -> None:
 class BotState(TypedDict):
     """State schema for the financial bot."""
     user_query: str
-    query_type: Optional[str]  # 'stock', 'bitcoin', 'other'
+    query_type: Optional[str]
     ticker_symbol: Optional[str]
     stock_data: Optional[Dict[str, Any]]
     bitcoin_data: Optional[Dict[str, Any]]
@@ -76,7 +75,6 @@ def initialize_state(state: Dict[str, Any]) -> BotState:
 
 # Company name to ticker lookup dictionary
 COMPANY_LOOKUP = {
-    # Major Tech Companies
     'apple': 'AAPL',
     'microsoft': 'MSFT',
     'google': 'GOOGL',
@@ -89,16 +87,12 @@ COMPANY_LOOKUP = {
     'nvidia': 'NVDA',
     'amd': 'AMD',
     'intel': 'INTC',
-
-    # Major Banks
     'jpmorgan': 'JPM',
     'bank of america': 'BAC',
     'wells fargo': 'WFC',
     'goldman sachs': 'GS',
     'morgan stanley': 'MS',
-
-    # Other Major Companies
-    'berkshire hathaway': 'BRK-B',
+    'berkshire hathaway': 'BRK.B',
     'johnson & johnson': 'JNJ',
     'procter & gamble': 'PG',
     'coca cola': 'KO',
@@ -139,8 +133,6 @@ COMPANY_LOOKUP = {
     'lyft': 'LYFT',
     'airbnb': 'ABNB',
     'snapchat': 'SNAP',
-    'twitter': 'TWTR',
-    'linkedin': 'LNKD',
     'paypal': 'PYPL',
     'square': 'SQ',
     'robinhood': 'HOOD'
@@ -150,7 +142,6 @@ def find_ticker_from_company_name(query: str) -> str:
     """Find ticker symbol from company name in the query."""
     query_lower = query.lower()
 
-    # Sort by length (longest first) to match "johnson & johnson" before "johnson"
     for company_name in sorted(COMPANY_LOOKUP.keys(), key=len, reverse=True):
         if company_name in query_lower:
             ticker = COMPANY_LOOKUP[company_name]
@@ -171,17 +162,16 @@ def analyze_query(state: BotState) -> BotState:
         logging.info("Detected Bitcoin query")
         return {**state, "query_type": "bitcoin"}
 
-    # First, try to find company names
+    # Try to find company names
     company_ticker = find_ticker_from_company_name(state["user_query"])
     if company_ticker:
         logging.info(f"Detected stock query for company name -> ticker: {company_ticker}")
         return {**state, "query_type": "stock", "ticker_symbol": company_ticker}
 
-    # Check for stock tickers (pattern: 2-5 uppercase letters, avoid common words)
+    # Check for stock tickers
     stock_pattern = r'\b[A-Z]{2,5}\b'
     matches = re.findall(stock_pattern, state["user_query"])
 
-    # Filter out common English words that aren't tickers
     common_words = {'I', 'IS', 'IT', 'IN', 'ON', 'TO', 'OF', 'THE', 'AND', 'OR', 'BUT', 'GET', 'CAN', 'HOW', 'YOU', 'YOUR'}
     valid_tickers = [match for match in matches if match not in common_words]
 
@@ -190,86 +180,138 @@ def analyze_query(state: BotState) -> BotState:
         logging.info(f"Detected stock query for ticker: {ticker}")
         return {**state, "query_type": "stock", "ticker_symbol": ticker}
 
-    # Check for common stock-related words
+    # Check for stock-related words
     stock_keywords = ['stock', 'share', 'price', 'ticker', 'market', 'equity']
     if any(keyword in query for keyword in stock_keywords):
         logging.info("Detected general stock query without specific ticker")
         return {**state, "query_type": "stock_general"}
 
-    # If none of the above, classify as other
     logging.info("Query not related to finance")
     return {**state, "query_type": "other"}
 
 def fetch_stock_data(state: BotState) -> BotState:
-    """Fetch stock data using yfinance."""
+    """Fetch stock data using Yahoo Finance API (via query2.finance.yahoo.com)."""
     logging.info(f"Fetching stock data for: {state['ticker_symbol']}")
 
     try:
-        # Let yfinance handle its own session (it uses curl_cffi internally)
-        ticker = yf.Ticker(state["ticker_symbol"])
-        info = ticker.info
-        hist = ticker.history(period="1d")
+        ticker = state["ticker_symbol"]
 
-        if hist.empty:
-            return {**state, "error_message": f"No data found for ticker {state['ticker_symbol']}"}
+        # Use Yahoo Finance API directly (no API key needed)
+        url = f"https://query2.finance.yahoo.com/v8/finance/chart/{ticker}"
+        params = {
+            "interval": "1d",
+            "range": "5d"
+        }
 
-        current_price = hist['Close'].iloc[-1]
-        previous_close = info.get('previousClose', current_price)
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        }
+
+        response = requests.get(url, params=params, headers=headers, timeout=10, verify=False)
+        response.raise_for_status()
+        data = response.json()
+
+        # Check if we got valid data
+        if 'chart' not in data or 'result' not in data['chart']:
+            return {**state, "error_message": f"No data found for ticker {ticker}. Please check the symbol."}
+
+        result = data['chart']['result'][0]
+        meta = result.get('meta', {})
+
+        current_price = meta.get('regularMarketPrice', 0)
+        previous_close = meta.get('previousClose', current_price)
         change = current_price - previous_close
-        change_percent = (change / previous_close) * 100 if previous_close != 0 else 0
+        change_percent = (change / previous_close * 100) if previous_close != 0 else 0
+
+        # Get additional quote data
+        quote_url = f"https://query2.finance.yahoo.com/v7/finance/quote"
+        quote_params = {"symbols": ticker}
+
+        try:
+            quote_response = requests.get(quote_url, params=quote_params, headers=headers, timeout=10, verify=False)
+            quote_response.raise_for_status()
+            quote_data = quote_response.json()
+
+            if 'quoteResponse' in quote_data and 'result' in quote_data['quoteResponse']:
+                quote_info = quote_data['quoteResponse']['result'][0]
+                company_name = quote_info.get('longName') or quote_info.get('shortName', ticker)
+                market_cap = quote_info.get('marketCap')
+                high = quote_info.get('regularMarketDayHigh', current_price)
+                low = quote_info.get('regularMarketDayLow', current_price)
+            else:
+                company_name = ticker
+                market_cap = None
+                high = current_price
+                low = current_price
+        except:
+            company_name = ticker
+            market_cap = None
+            high = current_price
+            low = current_price
 
         stock_data = {
-            "symbol": state["ticker_symbol"],
-            "name": info.get('longName', state["ticker_symbol"]),
+            "symbol": ticker,
+            "name": company_name,
             "current_price": round(current_price, 2),
             "previous_close": round(previous_close, 2),
             "change": round(change, 2),
             "change_percent": round(change_percent, 2),
-            "currency": info.get('currency', 'USD'),
-            "market_cap": info.get('marketCap'),
+            "high": round(high, 2),
+            "low": round(low, 2),
+            "currency": meta.get('currency', 'USD'),
+            "market_cap": market_cap,
             "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         }
 
-        logging.info(f"Successfully fetched stock data for {state['ticker_symbol']}")
+        logging.info(f"Successfully fetched stock data for {ticker}")
         return {**state, "stock_data": stock_data}
 
+    except requests.exceptions.RequestException as e:
+        error_msg = f"Network error fetching stock data: {str(e)}"
+        logging.error(error_msg)
+        return {**state, "error_message": error_msg}
     except Exception as e:
         error_msg = f"Error fetching stock data: {str(e)}"
         logging.error(error_msg)
         return {**state, "error_message": error_msg}
 
 def fetch_bitcoin_data(state: BotState) -> BotState:
-    """Fetch Bitcoin data from CoinGecko API."""
+    """Fetch Bitcoin data from Coinlore API."""
     logging.info("Fetching Bitcoin data")
 
     try:
-        url = "https://api.coingecko.com/api/v3/simple/price"
-        params = {
-            "ids": "bitcoin",
-            "vs_currencies": "usd",
-            "include_24hr_change": "true",
-            "include_market_cap": "true"
-        }
+        # Coinlore API - Bitcoin ID is 90
+        url = "https://api.coinlore.net/api/ticker/"
+        params = {"id": "90"}  # 90 is Bitcoin's ID in Coinlore
 
-        # Always use verify=False for corporate firewalls
         response = requests.get(url, params=params, timeout=10, verify=False)
         response.raise_for_status()
         data = response.json()
 
-        bitcoin_info = data["bitcoin"]
+        if not data or len(data) == 0:
+            return {**state, "error_message": "Could not fetch Bitcoin data from Coinlore"}
+
+        bitcoin_info = data[0]
 
         bitcoin_data = {
-            "name": "Bitcoin",
-            "symbol": "BTC",
-            "current_price": bitcoin_info["usd"],
-            "change_24h": round(bitcoin_info["usd_24h_change"], 2),
-            "market_cap": bitcoin_info["usd_market_cap"],
+            "name": bitcoin_info.get("name", "Bitcoin"),
+            "symbol": bitcoin_info.get("symbol", "BTC"),
+            "current_price": float(bitcoin_info.get("price_usd", 0)),
+            "change_24h": float(bitcoin_info.get("percent_change_24h", 0)),
+            "change_1h": float(bitcoin_info.get("percent_change_1h", 0)),
+            "change_7d": float(bitcoin_info.get("percent_change_7d", 0)),
+            "volume_24h": float(bitcoin_info.get("volume24", 0)) if bitcoin_info.get("volume24") else None,
+            "market_cap": float(bitcoin_info.get("market_cap_usd", 0)) if bitcoin_info.get("market_cap_usd") else None,
             "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         }
 
-        logging.info("Successfully fetched Bitcoin data")
+        logging.info("Successfully fetched Bitcoin data from Coinlore")
         return {**state, "bitcoin_data": bitcoin_data}
 
+    except requests.exceptions.RequestException as e:
+        error_msg = f"Network error fetching Bitcoin data: {str(e)}"
+        logging.error(error_msg)
+        return {**state, "error_message": error_msg}
     except Exception as e:
         error_msg = f"Error fetching Bitcoin data: {str(e)}"
         logging.error(error_msg)
@@ -289,16 +331,17 @@ def generate_response(state: BotState) -> BotState:
         change_symbol = "+" if data["change"] >= 0 else ""
 
         response = (
-            f"{data['name']} ({data['symbol']}) is currently trading at "
-            f"${data['current_price']} {data['currency']}. "
-            f"That's {change_symbol}${data['change']} ({change_symbol}{data['change_percent']:.2f}%) "
-            f"from the previous close of ${data['previous_close']}. "
-            f"The stock is {change_direction} today."
+            f"📈 {data['name']} ({data['symbol']})\n"
+            f"Current Price: ${data['current_price']} USD\n"
+            f"Change: {change_symbol}${data['change']} ({change_symbol}{data['change_percent']:.2f}%)\n"
+            f"Previous Close: ${data['previous_close']}\n"
+            f"Day Range: ${data['low']} - ${data['high']}\n"
+            f"Status: Stock is {change_direction} today"
         )
 
         if data.get("market_cap"):
             market_cap_b = data["market_cap"] / 1e9
-            response += f" Market cap: ${market_cap_b:.2f}B."
+            response += f"\nMarket Cap: ${market_cap_b:.2f}B"
 
     elif state["query_type"] == "bitcoin" and state.get("bitcoin_data"):
         data = state["bitcoin_data"]
@@ -306,25 +349,30 @@ def generate_response(state: BotState) -> BotState:
         change_symbol = "+" if data["change_24h"] >= 0 else ""
 
         response = (
-            f"{data['name']} ({data['symbol']}) is currently trading at "
-            f"${data['current_price']:,.2f} USD. "
-            f"That's {change_symbol}{data['change_24h']:.2f}% in the last 24 hours. "
-            f"Bitcoin is {change_direction} today."
+            f"₿ {data['name']} ({data['symbol']})\n"
+            f"Current Price: ${data['current_price']:,.2f} USD\n"
+            f"24h Change: {change_symbol}{data['change_24h']:.2f}%\n"
+            f"Status: Bitcoin is {change_direction} today"
         )
 
         if data.get("market_cap"):
             market_cap_b = data["market_cap"] / 1e9
-            response += f" Market cap: ${market_cap_b:.2f}B."
+            response += f"\nMarket Cap: ${market_cap_b:.2f}B"
+
+        if data.get("volume_24h"):
+            volume_b = data["volume_24h"] / 1e9
+            response += f"\n24h Volume: ${volume_b:.2f}B"
 
     elif state["query_type"] == "stock_general":
         response = (
-            "I can help you get stock prices! Please provide a ticker symbol. "
-            "For example: 'What's AAPL price?' or 'TSLA stock price'"
+            "I can help you get stock prices! Please provide a ticker symbol.\n"
+            "Examples: 'AAPL price', 'Tesla stock', 'What's MSFT worth?'"
         )
 
     else:
         response = (
-            "I'm a finance information bot. I can help you with:\n"
+            "🤖 Financial Data Bot\n"
+            "I can help you with:\n"
             "• Stock prices (e.g., 'AAPL price', 'Tesla stock')\n"
             "• Bitcoin price (e.g., 'Bitcoin price', 'BTC value')\n"
             "Please ask me about stock tickers or Bitcoin!"
@@ -358,7 +406,7 @@ def create_financial_bot() -> CompiledStateGraph:
     builder.add_edge(START, "initialize")
     builder.add_edge("initialize", "analyze_query")
 
-    # Conditional routing after query analysis
+    # Conditional routing
     builder.add_conditional_edges(
         "analyze_query",
         route_query,
@@ -369,7 +417,6 @@ def create_financial_bot() -> CompiledStateGraph:
         }
     )
 
-    # Both data fetching nodes lead to response generation
     builder.add_edge("fetch_stock", "generate_response")
     builder.add_edge("fetch_bitcoin", "generate_response")
     builder.add_edge("generate_response", END)
@@ -385,7 +432,6 @@ def run_bot(user_query: str) -> str:
         logging.info("Financial bot initialized successfully")
 
         inputs = {"user_query": user_query}
-
         result = bot.invoke(inputs)
         return result.get("response", "Sorry, I couldn't process your request.")
 
@@ -395,26 +441,31 @@ def run_bot(user_query: str) -> str:
 
 def main():
     """Interactive main function for testing the bot."""
-    print("🤖 Financial Data Bot")
-    print("Ask me about stock prices or Bitcoin!")
-    print("Examples: 'AAPL price', 'Bitcoin value', 'TSLA stock'")
+    print("🤖 Financial Data Bot (Alternative APIs)")
+    print("=" * 50)
+    print("Using Yahoo Finance for stocks & Coinlore for Bitcoin")
+    print("No API keys required!")
+    print("=" * 50)
+    print("\nAsk me about stock prices or Bitcoin!")
+    print("Examples: 'AAPL price', 'Bitcoin value', 'Tesla stock'")
     print("Type 'quit' to exit\n")
 
     while True:
         try:
             user_input = input("You: ").strip()
             if user_input.lower() in ['quit', 'exit', 'q']:
-                print("Goodbye!")
+                print("Goodbye! 👋")
                 break
 
             if not user_input:
                 continue
 
             response = run_bot(user_input)
-            print(f"Bot: {response}\n")
+            print(f"\n{response}\n")
+            print("-" * 50 + "\n")
 
         except KeyboardInterrupt:
-            print("\nGoodbye!")
+            print("\n\nGoodbye! 👋")
             break
         except Exception as e:
             print(f"Error: {e}\n")
