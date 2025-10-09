@@ -12,13 +12,18 @@ import requests
 import urllib3
 import yfinance as yf
 import ssl
+import os
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 from pydantic_settings import BaseSettings
 
-# Disable SSL verification for yfinance (needed for corporate firewalls)
-import certifi
+# Aggressive SSL bypass for corporate firewalls
 ssl._create_default_https_context = ssl._create_unverified_context
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+# Disable SSL verification in environment variables (for yfinance)
+os.environ['CURL_CA_BUNDLE'] = ''
+os.environ['REQUESTS_CA_BUNDLE'] = ''
 
 class Settings(BaseSettings):
     """Configuration settings for the financial bot."""
@@ -200,6 +205,7 @@ def fetch_stock_data(state: BotState) -> BotState:
     logging.info(f"Fetching stock data for: {state['ticker_symbol']}")
 
     try:
+        # Let yfinance handle its own session (it uses curl_cffi internally)
         ticker = yf.Ticker(state["ticker_symbol"])
         info = ticker.info
         hist = ticker.history(period="1d")
@@ -245,19 +251,10 @@ def fetch_bitcoin_data(state: BotState) -> BotState:
             "include_market_cap": "true"
         }
 
-        # Try with SSL verification first
-        try:
-            response = requests.get(url, params=params, timeout=10, verify=True)
-            response.raise_for_status()
-            data = response.json()
-        except requests.exceptions.SSLError as ssl_error:
-            # If SSL verification fails, try without verification (for corporate firewalls)
-            logging.warning(f"SSL verification failed: {ssl_error}. Retrying without SSL verification...")
-            import urllib3
-            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-            response = requests.get(url, params=params, timeout=10, verify=False)
-            response.raise_for_status()
-            data = response.json()
+        # Always use verify=False for corporate firewalls
+        response = requests.get(url, params=params, timeout=10, verify=False)
+        response.raise_for_status()
+        data = response.json()
 
         bitcoin_info = data["bitcoin"]
 
